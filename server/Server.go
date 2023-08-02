@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"datavisualization/model"
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
@@ -51,13 +53,82 @@ func Serve(db *sql.DB) {
 		return c.JSON(post)
 	})
 
+	app.Post("/data", func(c *fiber.Ctx) error {
+		res := c.FormValue("res")
+		cols := c.FormValue("cols")
+		tstart := c.FormValue("ts")
+		tend := c.FormValue("te")
+		skiprow := c.FormValue("skipr")
+
+		// Split the comma-separated column names into a slice
+		colNames := strings.Split(cols, ",")
+
+		// Construct the query
+		// query := fmt.Sprintf("SELECT event_time, %s FROM normal_%s WHERE event_time >= '%s'::timestamp AND event_time <= '%s'::timestamp LIMIT 10000", cols, res, tstart, tend)
+		query := fmt.Sprintf(`WITH numbered_rows AS (
+			SELECT 
+				event_time, %s,
+				ROW_NUMBER() OVER () AS row_num
+			FROM normal_%s
+			WHERE event_time >= '%s'::timestamp
+				AND event_time <= '%s'::timestamp
+		)
+		SELECT event_time, %s
+		FROM numbered_rows
+		WHERE (row_num - 1) %% %s = 0
+		LIMIT 10000;`, cols, res, tstart, tend, cols, skiprow)
+		log.Info().Msgf("q: %v", query)
+		rows, err := db.Query(query)
+		if err != nil {
+			log.Error().Err(err).Msg("Error querying the database:")
+			return c.Status(fiber.StatusInternalServerError).SendString(err.Error())
+		}
+		defer rows.Close()
+
+		// Process the query result
+		var postsResponse PostsResponse
+		var keys []string
+		var dataValue [][]interface{}
+
+		keys = append([]string{"TimeEvent"}, colNames...)
+
+		for rows.Next() {
+			var eventTime time.Time
+
+			// Create a slice of interface{} to hold the column values
+			columnPointers := make([]interface{}, len(colNames)+1)
+			columnPointers[0] = &eventTime
+			for i := 1; i < len(columnPointers); i++ {
+				var columnValue interface{}
+				columnPointers[i] = &columnValue
+			}
+
+			err := rows.Scan(columnPointers...)
+			if err != nil {
+				log.Error().Err(err).Msg("Error scanning row:")
+				return c.Status(fiber.StatusInternalServerError).SendString(err.Error())
+			}
+
+			// Assign the column values to the resultRow map
+			dataValue = append(dataValue, columnPointers)
+		}
+
+		// Populate the response struct
+		postsResponse.Keys = keys
+		postsResponse.DataValue = dataValue
+		postsResponse.RowCount = len(dataValue)
+
+		// Return the data as a JSON response
+		return c.JSON(postsResponse)
+	})
+
 	app.Post("/chart", func(c *fiber.Ctx) error {
 		res := c.FormValue("res")
 		tstart := c.FormValue("ts")
 		tend := c.FormValue("te")
 		// Sample data
 
-		query := fmt.Sprintf("SELECT * FROM normal_%s WHERE event_time >= '%s'::timestamp AND event_time <= '%s'::timestamp LIMIT 2000", res, tstart, tend)
+		query := fmt.Sprintf("SELECT * FROM normal_%s WHERE event_time >= '%s'::timestamp AND event_time <= '%s'::timestamp LIMIT 10000", res, tstart, tend)
 		log.Info().Msgf("q: %v", query)
 		rows, err := db.Query(query)
 		if err != nil {
